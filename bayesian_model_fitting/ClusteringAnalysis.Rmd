@@ -1,0 +1,757 @@
+---
+title: "Clustering Analysis"
+author: "Xiaoyan Wu"
+email: xiaoyan.psych@gmail.com
+date: "2026-02-20"
+output: html_document
+---
+
+# Load packages and read dataset with cluster information
+```{r}
+rm(list=ls())
+library(readr)
+library(dplyr)
+library(tidyr)
+library(rstan)
+library(purrr)
+library(here)
+
+cluster_path <- here("dataset", "subject_gender_cluster.csv")
+
+cluster_df <- read_csv(
+  cluster_path,
+  col_types = cols(
+    subid   = col_integer(),
+    gender  = col_character(),   # "Male" / "Female"
+    cluster = col_integer()
+  )
+) %>%
+  rename(subject_id = subid,
+         gender_label = gender)
+cluster_df
+```
+
+# # Read behavioral data (trial-level)
+```{r}
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),   # '男' / '女'
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+subjects <- sort(unique(dat$subject_id))
+S <- length(subjects)
+```
+
+# Construct subject-level information table
+```{r}
+sub_df <- tibble(subject_id = subjects) %>%
+  left_join(cluster_df, by = "subject_id")
+
+# check missing cluster
+table(is.na(sub_df$cluster))
+
+print(sub_df)
+```
+
+# Extract posterior samples and compute subject-level posterior means (10 parameters)
+```{r}
+
+fit <- readRDS(
+  here("Results", "fit_m08_SI_SCI_VCI_EC_RP_ID_lapse.rds")
+)
+
+post <- rstan::extract(fit)
+
+param_names <- c(
+  "gama","envy","guilt","lambda","kapa",
+  "etak","etaa","oumiga","minp","maxp"
+)
+
+param_df <- map_dfc(
+  param_names,
+  ~ tibble(!! .x := colMeans(post[[.x]]))
+) %>%
+  mutate(subject_id = subjects) %>%
+  left_join(sub_df, by = "subject_id")
+
+head(param_df)
+```
+
+# Boys (2 clusters): Wilcoxon rank-sum test
+```{r}
+
+library(dplyr)
+library(purrr)
+library(tibble)
+
+boys_df <- param_df %>%
+  filter(gender_label == "Male")
+
+wilcox_boys <- map_df(
+  param_names,
+  function(p) {
+    x <- boys_df %>% filter(cluster == 1) %>% pull(p)
+    y <- boys_df %>% filter(cluster == 2) %>% pull(p)
+
+    w <- wilcox.test(x, y, exact = FALSE)
+
+    # sample size
+    n1 <- length(x)
+    n2 <- length(y)
+    N  <- n1 + n2
+
+    # W statistic
+    W <- as.numeric(w$statistic)
+
+    # Normal approximation Z (Wilcoxon rank-sum test)
+    mu_W  <- n1 * n2 / 2
+    sd_W  <- sqrt(n1 * n2 * (n1 + n2 + 1) / 12)
+    Z     <- (W - mu_W) / sd_W
+
+    # Effect size r
+    r <- Z / sqrt(N)
+
+    tibble(
+      parameter = p,
+      test      = "Wilcoxon rank-sum",
+      n_cluster1 = n1,
+      n_cluster2 = n2,
+      W          = round(W, 2),
+      Z          = round(Z, 3),
+      r          = round(r, 3),
+      median_c1  = median(x, na.rm = TRUE),
+      IQR_c1     = IQR(x, na.rm = TRUE),
+      median_c2  = median(y, na.rm = TRUE),
+      IQR_c2     = IQR(y, na.rm = TRUE),
+      p_value    = w$p.value
+    )
+  }
+) %>%
+  mutate(
+    p_holm  = p.adjust(p_value, method = "holm"),
+    p_value = round(p_value, 6),
+    p_holm  = round(p_holm, 6),
+    median_c1 = round(median_c1, 3),
+    IQR_c1    = round(IQR_c1, 3),
+    median_c2 = round(median_c2, 3),
+    IQR_c2    = round(IQR_c2, 3)
+  )
+
+cat("\n===== Boys (2 clusters): Wilcoxon + Holm (Full Report) =====\n")
+print(wilcox_boys)
+
+```
+
+
+# Girls (three clusters): Kruskal–Wallis test with Holm correction
+```{r}
+library(dplyr)
+library(purrr)
+library(tibble)
+
+girls_df <- param_df %>%
+  filter(gender_label == "Female")
+
+kw_girls <- map_df(
+  param_names,
+  function(p) {
+
+    f <- as.formula(paste(p, "~ factor(cluster)"))
+    k <- kruskal.test(f, data = girls_df)
+    H  <- as.numeric(k$statistic)
+    df <- as.numeric(k$parameter)   # df = k - 1 = 2
+    p_val <- k$p.value
+
+    # sample size
+    n <- sum(!is.na(girls_df[[p]]))
+    k_groups <- length(unique(girls_df$cluster))
+
+    # Kruskal–Wallis eta-squared
+    eta2_H <- (H - k_groups + 1) / (n - k_groups)
+
+    tibble(
+      parameter = p,
+      test      = "Kruskal–Wallis",
+      H         = round(H, 3),
+      df        = df,
+      eta2_H    = round(eta2_H, 3),
+      p_value   = p_val
+    )
+  }
+) %>%
+  mutate(
+    p_corr  = p.adjust(p_value, method = "bonferroni"),
+    p_value = round(p_value, 6),
+    p_corr  = round(p_corr, 6)
+  )
+
+cat("\n===== Girls (3 clusters): Kruskal–Wallis + Holm (main effects only) =====\n")
+print(kw_girls)
+
+```
+
+
+# Girls: post hoc tests
+```{r}
+library(FSA)
+library(dplyr)
+library(purrr)
+
+sig_params <- kw_girls %>%
+  filter(p_corr < 1) %>%
+  pull(parameter)
+
+posthoc_girls <- map_df(
+  sig_params,
+  function(p) {
+
+    f <- as.formula(paste(p, "~ factor(cluster)"))
+
+    d <- dunnTest(
+      f,
+      data   = girls_df,
+      method = "holm"   # Dunn's post hoc test with Holm correction
+    )
+
+    # Effective sample size for computing effect size r
+    n <- sum(!is.na(girls_df[[p]]))
+
+    d$res %>%
+      transmute(
+        Parameter  = p,
+        Comparison = Comparison,
+        Z          = round(Z, 3),
+        r          = round(Z / sqrt(n), 3),
+        p_corr     = round(P.adj, 6)   # p_holm_global
+      )
+  }
+)
+
+posthoc_girls <- posthoc_girls %>%
+  mutate(
+    p_bonf_global = round(p.adjust(p_corr, method = "bonferroni"), 6)
+  )
+
+print(posthoc_girls, n = Inf)
+write.csv(posthoc_girls, "posthoc_girls_final.csv", row.names = FALSE)
+```
+
+
+# Standardize parameters across all subjects
+```{r}
+library(dplyr)
+
+# -------------------------------------------------
+# Apply min–max normalization to each parameter across all subjects
+# -------------------------------------------------
+
+param_df_scaled <- param_df
+
+for (p in param_names) {
+  min_p <- min(param_df[[p]], na.rm = TRUE)
+  max_p <- max(param_df[[p]], na.rm = TRUE)
+
+  param_df_scaled[[p]] <- (param_df[[p]] - min_p) / (max_p - min_p)
+}
+
+# -------------------------------------------------
+# Compute parameter means by gender × cluster
+# -------------------------------------------------
+
+radar_df <- param_df_scaled %>%
+  group_by(gender_label, cluster) %>%
+  summarise(
+    across(all_of(param_names), mean, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    gender_label = gender_label
+  )
+radar_df
+
+
+boys_df  <- radar_df %>% filter(gender_label == "Male")
+girls_df <- radar_df %>% filter(gender_label == "Female")
+
+
+```
+
+
+# Girls: radar plot
+```{r}
+library(fmsb)
+library(scales)
+
+# -----------------------------
+# Parameter names (for radar plot display)
+# -----------------------------
+param_labels <- c(
+  expression(gamma),
+  expression(alpha),
+  expression(beta),
+  expression(lambda),
+  expression(kappa),
+  expression(eta[keep]),
+  expression(eta[act]),
+  expression(omega),
+  expression(p[min]),
+  expression(p[max])
+)
+
+# -----------------------------
+# Girls: prepare data for radar chart
+# -----------------------------
+girls_mat <- girls_df %>%
+  select(all_of(param_names)) %>%
+  as.data.frame()
+
+girls_radar <- rbind(
+  rep(1, length(param_names)),  # max
+  rep(0, length(param_names)),  # min
+  girls_mat
+)
+
+colnames(girls_radar) <- param_names
+
+# -----------------------------
+# Girls: color palette
+# -----------------------------
+colors_girls <- c(
+  "#B500B2",  # Cluster 1
+  "#FF52A0",  # Cluster 2
+  "#FFA47F"   # Cluster 3
+)
+
+cols_girls_line <- alpha(colors_girls, 0.75)
+cols_girls_fill <- alpha(colors_girls, 0)
+
+# -----------------------------
+# Girls: radar chart
+# -----------------------------
+par(family = "Arial")
+radarchart(
+  girls_radar,
+  axistype = 0,
+
+  pcol  = cols_girls_line,
+  plwd  = 3,
+  plty  = 1,
+  pfcol = cols_girls_fill,
+
+  cglcol = "grey85",
+  cglty  = 1,
+  cglwd  = 0.8,
+
+  axislabcol = "grey60",
+  vlcex = 1,
+  vlabels = param_labels,
+
+  title = "Girls: Cluster-specific parameter profiles"
+)
+
+legend(
+  "topright",
+  legend = paste0("Cluster ", girls_df$cluster),
+  col = colors_girls,
+  lwd = 3,
+  lty = 1,
+  bty = "n"
+)
+
+
+# -----------------------------
+# Export boys radar chart (PNG)
+# -----------------------------
+
+png(
+  filename = "girls_radar.png",
+  width = 1800,
+  height = 1300,
+  res = 300
+)
+
+par(family = "Arial")
+
+radarchart(
+  girls_radar,
+  axistype = 0,
+
+  pcol  = cols_girls_line,
+  plwd  = 3,
+  plty  = 1,
+  pfcol = cols_girls_fill,
+
+  cglcol = "grey85",
+  cglty  = 1,
+  cglwd  = 0.8,
+
+  axislabcol = "grey60",
+  vlcex = 1,
+  vlabels = param_labels,
+
+  title = "Girls: Cluster-specific parameter profiles"
+)
+
+legend(
+  "topright",
+  legend = paste0("Cluster ", sort(unique(girls_df$cluster))),
+  col = colors_girls,
+  lwd = 3,
+  lty = 1,
+  bty = "n"
+)
+
+dev.off()
+```
+
+
+# Girls: boxplot
+```{r}
+#=================================
+# Data preparation
+#=================================
+girls_mat <- param_df %>% 
+  filter(gender_label == "Female")
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+#---------------------------------
+# 1. Parameters to plot
+#---------------------------------
+params_plot <- c("gama", "envy", "kapa","etak", "oumiga", "minp")
+
+#---------------------------------
+# 2. Long format
+#---------------------------------
+girls_long <- girls_mat %>%
+  select(cluster, all_of(params_plot)) %>%
+  pivot_longer(
+    cols = all_of(params_plot),
+    names_to = "parameter",
+    values_to = "value"
+  ) %>%
+  mutate(
+    cluster = factor(cluster)
+  )
+
+#---------------------------------
+# 3. Colors
+#---------------------------------
+colors_girls <- c(
+  "1" = "#B500B2",
+  "2" = "#FF52A0",
+  "3" = "#FFA47F"
+)
+
+#---------------------------------
+# 4. Parameter labels
+#---------------------------------
+param_labels <- c(
+  gama   = "gamma",
+  envy   = "alpha",
+  lambda = "lambda",
+  kapa   = "kappa",
+  etak = "etak",
+  oumiga = "omega",
+  minp   = "p[min]"
+)
+
+#---------------------------------
+# 5. Plot
+#---------------------------------
+p_girls <- ggplot(
+  girls_long,
+  aes(x = cluster, y = value, color = cluster)
+) +
+  geom_boxplot(
+    width = 0.6,
+    outlier.shape = NA,
+    linewidth = 1
+  ) +
+  geom_jitter(
+    width = 0.15,
+    size = 2,
+    alpha = 0.4
+  ) +
+  facet_wrap(
+    ~ parameter,
+    scales = "free_y",
+    ncol = 6,
+    labeller = as_labeller(param_labels, label_parsed)
+  ) +
+  scale_color_manual(values = colors_girls) +
+  labs(
+    x = "Cluster",
+    y = "Parameter value",
+    title = "Girls: Cluster differences in model parameters",
+    subtitle = "Boxplots show median and IQR; points represent individual participants"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 13),
+
+    # ⭐ 与 boys 图完全一致的关键设置
+    panel.grid = element_blank(),                    # 去掉灰色 grid
+    axis.line = element_line(color = "black", linewidth = 0.8),
+    axis.ticks = element_line(color = "black")
+  )
+
+#---------------------------------
+# 6. Display
+#---------------------------------
+print(p_girls)
+
+ggsave(
+  "girls_cluster_parameters.png",
+  p_girls,
+  width = 14,
+  height = 4,
+  dpi = 300
+)
+```
+
+# Boys: radar chart
+```{r}
+# -----------------------------
+# Boys: prepare data for radar chart
+# -----------------------------
+
+param_labels <- c(
+  gama   = expression(gamma),
+  envy   = expression(alpha),
+  guilt  = expression(beta),
+  lambda = expression(lambda),
+  kapa   = expression(kappa),
+  etak   = expression(eta[keep]),
+  etaa   = expression(eta[action]),
+  oumiga = expression(omega),
+  minp   = expression(p[min]),
+  maxp   = expression(p[max])
+)
+boys_mat <- boys_df %>%
+  select(all_of(param_names)) %>%
+  as.data.frame()
+
+boys_radar <- rbind(
+  rep(1, length(param_names)),  # max
+  rep(0, length(param_names)),  # min
+  boys_mat
+)
+
+colnames(boys_radar) <- param_names
+
+
+# -----------------------------
+# Boys: color palette
+# -----------------------------
+colors_boys <- c(
+  "#685AFF",   # Cluster 1
+  "#9CCFFF"  # Cluster 2
+)
+
+cols_boys_line <- alpha(colors_boys, 0.75)
+cols_boys_fill <- alpha(colors_boys, 0)
+
+# -----------------------------
+# Boys: radar chart
+# -----------------------------
+par(family = "Arial")
+radarchart(
+  boys_radar,
+  axistype = 0,
+
+  pcol  = cols_boys_line,
+  plwd  = 3,
+  plty  = 1,
+  pfcol = cols_boys_fill,
+
+  cglcol = "grey85",
+  cglty  = 1,
+  cglwd  = 0.8,
+
+  axislabcol = "grey60",
+  vlcex = 1,
+  vlabels = param_labels,
+
+  title = "Boys: Cluster-specific parameter profiles"
+)
+
+legend(
+  "topright",
+  legend = paste0("Cluster ", boys_df$cluster),
+  col = colors_boys,
+  lwd = 3,
+  lty = 1,
+  bty = "n"
+)
+
+
+# -----------------------------
+# Export boys radar chart (PNG)
+# -----------------------------
+png(
+  filename = "boys_radar.png",
+  width = 1800,
+  height = 1300,
+  res = 300
+)
+
+par(family = "Arial")
+
+radarchart(
+  boys_radar,
+  axistype = 0,
+
+  pcol  = cols_boys_line,
+  plwd  = 3,
+  plty  = 1,
+  pfcol = cols_boys_fill,
+
+  cglcol = "grey85",
+  cglty  = 1,
+  cglwd  = 0.8,
+
+  axislabcol = "grey60",
+  vlcex = 1,
+  vlabels = param_labels,
+
+  title = "Boys: Cluster-specific parameter profiles"
+)
+
+legend(
+  "topright",
+  legend = paste0("Cluster ", sort(unique(boys_df$cluster))),
+  col = colors_boys,
+  lwd = 3,
+  lty = 1,
+  bty = "n"
+)
+
+dev.off()
+```
+
+
+# Boys: boxplot
+```{r}
+#=================================
+# Data preparation
+#=================================
+boys_mat <- param_df %>% 
+  filter(gender_label == "Male")
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+#---------------------------------
+# 1. Parameters to plot
+#---------------------------------
+params_plot_boys <- c("gama", "envy", "kapa", "minp", "maxp")
+
+#---------------------------------
+# 2. Long format
+#---------------------------------
+boys_long <- boys_mat %>%
+  select(cluster, all_of(params_plot_boys)) %>%
+  pivot_longer(
+    cols = all_of(params_plot_boys),
+    names_to = "parameter",
+    values_to = "value"
+  ) %>%
+  mutate(
+    cluster = factor(cluster)
+  )
+
+#---------------------------------
+# 3. Colors
+#---------------------------------
+colors_boys <- c(
+  "1" = "#685AFF",
+  "2" = "#9CCFFF"
+)
+
+#---------------------------------
+# 4. Parameter labels
+#---------------------------------
+param_labels_boys <- c(
+  gama = "gamma",
+  envy = "alpha",
+  kapa = "kappa",
+  minp = "p[min]",
+  maxp = "p[max]"
+)
+
+#---------------------------------
+# 5. Plot
+#---------------------------------
+p_boys <- ggplot(
+  boys_long,
+  aes(x = cluster, y = value, color = cluster)
+) +
+  geom_boxplot(
+    width = 0.6,
+    outlier.shape = NA,
+    linewidth = 1
+  ) +
+  geom_jitter(
+    width = 0.15,
+    size = 2,
+    alpha = 0.4
+  ) +
+  facet_wrap(
+    ~ parameter,
+    scales = "free_y",
+    ncol = 5,
+    labeller = as_labeller(param_labels_boys, label_parsed)
+  ) +
+  scale_color_manual(values = colors_boys) +
+  labs(
+    x = "Cluster",
+    y = "Parameter value",
+    title = "Boys: Cluster differences in model parameters",
+    subtitle = "Boxplots show median and IQR; points represent individual participants"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 13),
+
+    # ⭐ 关键三行
+    panel.grid = element_blank(),                    # 去掉灰色 grid
+    axis.line = element_line(color = "black", linewidth = 0.8),  # 加回 x/y 轴线
+    axis.ticks = element_line(color = "black")       #（可选）轴刻度更清晰
+  )
+
+#---------------------------------
+# 6. Display & save
+#---------------------------------
+print(p_boys)
+
+ggsave(
+  "boys_cluster_parameters.png",
+  p_boys,
+  width = 14,
+  height = 4,
+  dpi = 300
+)
+```
