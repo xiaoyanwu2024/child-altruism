@@ -1,0 +1,897 @@
+---
+title: "Model Prediction"
+author: "Xiaoyan Wu"
+email: xiaoyan.psych@gmail.com
+date: "2026-02-23"
+output: html_document
+---
+
+```{r}
+library(rstan)
+library(dplyr)
+library(readr)
+library(here)
+
+fit <- readRDS(
+  here("Results", "fit_m08_SI_SCI_VCI_EC_RP_ID_lapse.rds")
+)
+
+post <- rstan::extract(fit)
+```
+
+
+```{r}
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(
+    subj_index = as.integer(factor(subject_id))
+  )
+```
+
+
+```{r}
+# ===== 1. posterior mean（subject-level）=====
+post_mean <- list(
+  gama   = colMeans(post$gama),
+  envy   = colMeans(post$envy),
+  guilt  = colMeans(post$guilt),
+  lambda = colMeans(post$lambda),
+  kapa   = colMeans(post$kapa),
+  etak   = colMeans(post$etak),
+  etaa   = colMeans(post$etaa),
+  oumiga = colMeans(post$oumiga),
+  minp   = colMeans(post$minp),
+  maxp   = colMeans(post$maxp)
+)
+
+# ===== 2. Compute trial-by-trial predictions based on the Stan likelihood =====
+dat <- dat %>%
+  rowwise() %>%
+  mutate(
+    # constants
+    x3  = 5,
+    x3s = x3 - cost,
+
+    # punishment / help
+    x1s = ifelse(block == 1, violator - cost * ratio, violator),
+    x2s = ifelse(block == 1, victim, victim + ratio * cost),
+
+    disad = pmax(x1s - x3s, 0) + pmax(x2s - x3s, 0),
+    ad    = pmax(x3s - x1s, 0) + pmax(x3s - x2s, 0),
+    inqua = pmax(x1s - x2s, 0),
+    RP    = pmax(x2s - x1s, 0),
+
+    IIk = 2 / (1 + exp(post_mean$etak[subj_index] * (cost / 50))),
+    IIa = 2 / (1 + exp(post_mean$etaa[subj_index] * (cost / 50))),
+
+    EP_yes = x1s + x2s,
+    EP_no  = violator + victim,
+
+    Uyes = x3s
+      - post_mean$envy[subj_index]  * disad
+      - post_mean$guilt[subj_index] * ad
+      - post_mean$gama[subj_index]  * inqua * IIa
+      + post_mean$kapa[subj_index]  * RP
+      + post_mean$oumiga[subj_index] * EP_yes,
+
+    Uno = x3
+      - post_mean$envy[subj_index]  * (pmax(violator - x3, 0) + pmax(victim - x3, 0))
+      - post_mean$guilt[subj_index] * (pmax(x3 - violator, 0) + pmax(x3 - victim, 0))
+      - post_mean$gama[subj_index]  * (pmax(violator - victim, 0) * IIk)
+      + post_mean$kapa[subj_index]  * pmax(victim - violator, 0)
+      + post_mean$oumiga[subj_index] * EP_no,
+
+    p_core = plogis(post_mean$lambda[subj_index] * (Uyes - Uno)),
+
+    prediction = post_mean$minp[subj_index] +
+      (1 - post_mean$minp[subj_index] - post_mean$maxp[subj_index]) * p_core,
+    
+    # ===== Bernoulli distribution prediction =====
+    prediction_bern = rbinom(1, 1, prediction)
+    
+  ) %>%
+  ungroup()
+
+```
+
+
+```{r}
+library(readr)
+
+write_csv(
+  dat,
+  here("dataset", "trials_with_prediction.csv")
+)
+```
+
+
+# The following sections save prediction data for each model;
+# the preceding section corresponds to the best-fitting model.
+
+# predictModel_m01.R
+```{r}
+library(rstan)
+library(dplyr)
+library(readr)
+
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(
+    subj_index = as.integer(factor(subject_id))
+  )
+
+# ---------- load fit ----------
+fit <- readRDS(
+  here("Results", "fit_m01_baseline.rds")
+)
+
+post <- rstan::extract(fit)
+
+post_mean <- list(
+  logit_p = colMeans(post$logit_p)
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(subj_index = as.integer(factor(subject_id)))
+
+# ---------- prediction ----------
+dat_pred <- dat %>%
+  rowwise() %>%
+  mutate(
+    prediction = plogis(post_mean$logit_p[subj_index]),
+    prediction_bern = rbinom(1, 1, prediction)
+  ) %>%
+  ungroup()
+
+write_csv(dat_pred, "prediction_m01.csv")
+
+```
+
+
+# model 2
+```{r}
+library(rstan)
+library(dplyr)
+library(readr)
+
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(
+    subj_index = as.integer(factor(subject_id))
+  )
+
+
+fit <- readRDS(
+  here("Results", "fit_m02_SI.rds")
+)
+
+
+post <- rstan::extract(fit)
+
+post_mean <- list(
+  lambda = colMeans(post$lambda)
+)
+
+
+dat_pred <- dat %>%
+  rowwise() %>%
+  mutate(
+    x3 = 5,
+    Uyes = x3 - cost,
+    Uno  = x3,
+
+    prediction = plogis(
+      post_mean$lambda[subj_index] * (Uyes - Uno)
+    ),
+
+    prediction_bern = rbinom(1, 1, prediction)
+  ) %>%
+  ungroup()
+
+write_csv(dat_pred, "prediction_m02.csv")
+```
+
+
+# model 3
+```{r}
+library(rstan)
+library(dplyr)
+library(readr)
+
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(
+    subj_index = as.integer(factor(subject_id))
+  )
+
+fit <- readRDS(
+  here("Results", "fit_m03_SI_SCI.rds")
+)
+
+post <- rstan::extract(fit)
+
+post_mean <- list(
+  envy   = colMeans(post$envy),
+  guilt  = colMeans(post$guilt),
+  lambda = colMeans(post$lambda)
+)
+
+
+dat_pred <- dat %>%
+  rowwise() %>%
+  mutate(
+    x3  = 5,
+    x3s = x3 - cost,
+
+    x1s = ifelse(block == 1, violator - cost * ratio, violator),
+    x2s = ifelse(block == 1, victim, victim + ratio * cost),
+
+    disad = pmax(x1s - x3s, 0) + pmax(x2s - x3s, 0),
+    ad    = pmax(x3s - x1s, 0) + pmax(x3s - x2s, 0),
+
+    disad_no = pmax(violator - x3, 0) + pmax(victim - x3, 0),
+    ad_no    = pmax(x3 - violator, 0) + pmax(x3 - victim, 0),
+
+    Uyes = x3s
+      - post_mean$envy[subj_index]  * disad
+      - post_mean$guilt[subj_index] * ad,
+
+    Uno = x3
+      - post_mean$envy[subj_index]  * disad_no
+      - post_mean$guilt[subj_index] * ad_no,
+
+    prediction = plogis(
+      post_mean$lambda[subj_index] * (Uyes - Uno)
+    ),
+
+    prediction_bern = rbinom(1, 1, prediction)
+  ) %>%
+  ungroup()
+
+write_csv(dat_pred, "prediction_m03.csv")
+```
+
+
+# model 4
+```{r}
+library(rstan)
+library(dplyr)
+library(readr)
+
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(
+    subj_index = as.integer(factor(subject_id))
+  )
+
+fit <- readRDS(
+  here("Results", "fit_m04_SI_SCI_VCI.rds")
+)
+
+
+post <- rstan::extract(fit)
+
+post_mean <- list(
+  gama   = colMeans(post$gama),
+  envy   = colMeans(post$envy),
+  guilt  = colMeans(post$guilt),
+  lambda = colMeans(post$lambda)
+)
+
+dat_pred <- dat %>%
+  rowwise() %>%
+  mutate(
+    x3  = 5,
+    x3s = x3 - cost,
+
+    x1s = ifelse(block == 1, violator - cost * ratio, violator),
+    x2s = ifelse(block == 1, victim, victim + ratio * cost),
+
+    disad = pmax(x1s - x3s, 0) + pmax(x2s - x3s, 0),
+    ad    = pmax(x3s - x1s, 0) + pmax(x3s - x2s, 0),
+    inqua = pmax(x1s - x2s, 0),
+
+    disad_no = pmax(violator - x3, 0) + pmax(victim - x3, 0),
+    ad_no    = pmax(x3 - violator, 0) + pmax(x3 - victim, 0),
+    inqua_no = pmax(violator - victim, 0),
+
+    Uyes = x3s
+      - post_mean$envy[subj_index]  * disad
+      - post_mean$guilt[subj_index] * ad
+      - post_mean$gama[subj_index]  * inqua,
+
+    Uno = x3
+      - post_mean$envy[subj_index]  * disad_no
+      - post_mean$guilt[subj_index] * ad_no
+      - post_mean$gama[subj_index]  * inqua_no,
+
+    prediction = plogis(
+      post_mean$lambda[subj_index] * (Uyes - Uno)
+    ),
+
+    prediction_bern = rbinom(1, 1, prediction)
+  ) %>%
+  ungroup()
+
+write_csv(dat_pred, "prediction_m04.csv")
+```
+
+
+# model 5
+```{r}
+
+library(rstan)
+library(dplyr)
+library(readr)
+
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(
+    subj_index = as.integer(factor(subject_id))
+  )
+
+# ---------- 1. load Stan fit ----------
+fit <- readRDS(
+  here("Results", "fit_m05_SI_SCI_VCI_EC.rds")
+)
+
+post <- rstan::extract(fit)
+
+# subject-level posterior means
+post_mean <- list(
+  gama   = colMeans(post$gama),
+  envy   = colMeans(post$envy),
+  guilt  = colMeans(post$guilt),
+  lambda = colMeans(post$lambda),
+  oumiga = colMeans(post$oumiga)
+)
+
+# ---------- 3. trial-level prediction ----------
+dat_pred <- dat %>%
+  rowwise() %>%
+  mutate(
+    # -------- constants --------
+    x3  = 5,
+    x3s = x3 - cost,
+
+    # -------- payoff transformation --------
+    x1s = ifelse(block == 1, violator - cost * ratio, violator),
+    x2s = ifelse(block == 1, victim, victim + ratio * cost),
+
+    # -------- inequality terms (YES) --------
+    disad = pmax(x1s - x3s, 0) + pmax(x2s - x3s, 0),
+    ad    = pmax(x3s - x1s, 0) + pmax(x3s - x2s, 0),
+    inqua = pmax(x1s - x2s, 0),
+
+    # -------- inequality terms (NO) --------
+    disad_no = pmax(violator - x3, 0) + pmax(victim - x3, 0),
+    ad_no    = pmax(x3 - violator, 0) + pmax(x3 - victim, 0),
+    inqua_no = pmax(violator - victim, 0),
+
+    # -------- efficiency terms --------
+    EP_yes = x1s + x2s,
+    EP_no  = violator + victim,
+
+    # -------- utilities --------
+    Uyes = x3s
+      - post_mean$envy[subj_index]   * disad
+      - post_mean$guilt[subj_index]  * ad
+      - post_mean$gama[subj_index]   * inqua
+      + post_mean$oumiga[subj_index] * EP_yes,
+
+    Uno = x3
+      - post_mean$envy[subj_index]   * disad_no
+      - post_mean$guilt[subj_index]  * ad_no
+      - post_mean$gama[subj_index]   * inqua_no
+      + post_mean$oumiga[subj_index] * EP_no,
+
+    # -------- choice probability --------
+    prediction = plogis(
+      post_mean$lambda[subj_index] * (Uyes - Uno)
+    ),
+
+    # -------- posterior predictive draw --------
+    prediction_bern = rbinom(1, 1, prediction)
+  ) %>%
+  ungroup()
+
+# ---------- 4. save output ----------
+write_csv(dat_pred, "prediction_m05.csv")
+
+
+```
+
+
+# model 6
+```{r}
+library(rstan)
+library(dplyr)
+library(readr)
+
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(
+    subj_index = as.integer(factor(subject_id))
+  )
+
+
+# ---------- 1. load Stan fit ----------
+fit <- readRDS(
+  here("Results", "fit_m06_SI_SCI_VCI_EC_RP.rds")
+)
+
+
+post <- rstan::extract(fit)
+
+# subject-level posterior means
+post_mean <- list(
+  gama   = colMeans(post$gama),
+  envy   = colMeans(post$envy),
+  guilt  = colMeans(post$guilt),
+  lambda = colMeans(post$lambda),
+  kapa   = colMeans(post$kapa),
+  oumiga = colMeans(post$oumiga)
+)
+
+# ---------- 3. trial-level prediction ----------
+dat_pred <- dat %>%
+  rowwise() %>%
+  mutate(
+    # -------- constants --------
+    x3  = 5,
+    x3s = x3 - cost,
+
+    # -------- payoff transformation --------
+    x1s = ifelse(block == 1, violator - cost * ratio, violator),
+    x2s = ifelse(block == 1, victim, victim + ratio * cost),
+
+    # -------- inequality terms (YES) --------
+    disad = pmax(x1s - x3s, 0) + pmax(x2s - x3s, 0),
+    ad    = pmax(x3s - x1s, 0) + pmax(x3s - x2s, 0),
+    inqua = pmax(x1s - x2s, 0),
+    RP    = pmax(x2s - x1s, 0),
+
+    # -------- inequality terms (NO) --------
+    disad_no = pmax(violator - x3, 0) + pmax(victim - x3, 0),
+    ad_no    = pmax(x3 - violator, 0) + pmax(x3 - victim, 0),
+    inqua_no = pmax(violator - victim, 0),
+    RP_no    = pmax(victim - violator, 0),
+
+    # -------- efficiency terms --------
+    EP_yes = x1s + x2s,
+    EP_no  = violator + victim,
+
+    # -------- utilities --------
+    Uyes = x3s
+      - post_mean$envy[subj_index]   * disad
+      - post_mean$guilt[subj_index]  * ad
+      - post_mean$gama[subj_index]   * inqua
+      + post_mean$kapa[subj_index]   * RP
+      + post_mean$oumiga[subj_index] * EP_yes,
+
+    Uno = x3
+      - post_mean$envy[subj_index]   * disad_no
+      - post_mean$guilt[subj_index]  * ad_no
+      - post_mean$gama[subj_index]   * inqua_no
+      + post_mean$kapa[subj_index]   * RP_no
+      + post_mean$oumiga[subj_index] * EP_no,
+
+    # -------- choice probability --------
+    prediction = plogis(
+      post_mean$lambda[subj_index] * (Uyes - Uno)
+    ),
+
+    # -------- posterior predictive draw --------
+    prediction_bern = rbinom(1, 1, prediction)
+  ) %>%
+  ungroup()
+
+# ---------- 4. save output ----------
+write_csv(dat_pred, "prediction_m06.csv")
+
+```
+
+
+# model 7
+```{r}
+library(rstan)
+library(dplyr)
+library(readr)
+
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(
+    subj_index = as.integer(factor(subject_id))
+  )
+
+
+# ---------- 1. load Stan fit ----------
+fit <- readRDS(
+  here("Results", "fit_m07_SI_SCI_VCI_EC_RP_ID.rds")
+)
+
+post <- rstan::extract(fit)
+
+# subject-level posterior means
+post_mean <- list(
+  gama   = colMeans(post$gama),
+  envy   = colMeans(post$envy),
+  guilt  = colMeans(post$guilt),
+  lambda = colMeans(post$lambda),
+  kapa   = colMeans(post$kapa),
+  etak   = colMeans(post$etak),
+  etaa   = colMeans(post$etaa),
+  oumiga = colMeans(post$oumiga)
+)
+
+# ---------- 3. trial-level prediction ----------
+dat_pred <- dat %>%
+  rowwise() %>%
+  mutate(
+    # -------- constants --------
+    x3  = 5,
+    x3s = x3 - cost,
+
+    # -------- payoff transformation --------
+    x1s = ifelse(block == 1, violator - cost * ratio, violator),
+    x2s = ifelse(block == 1, victim, victim + ratio * cost),
+
+    # -------- inequality terms (YES) --------
+    disad = pmax(x1s - x3s, 0) + pmax(x2s - x3s, 0),
+    ad    = pmax(x3s - x1s, 0) + pmax(x3s - x2s, 0),
+    inqua = pmax(x1s - x2s, 0),
+    RP    = pmax(x2s - x1s, 0),
+
+    # -------- inequality terms (NO) --------
+    disad_no = pmax(violator - x3, 0) + pmax(victim - x3, 0),
+    ad_no    = pmax(x3 - violator, 0) + pmax(x3 - victim, 0),
+    inqua_no = pmax(violator - victim, 0),
+    RP_no    = pmax(victim - violator, 0),
+
+    # -------- ID attention (cost-dependent) --------
+    IIk = 2 / (1 + exp(post_mean$etak[subj_index] * (cost / 50))),
+    IIa = 2 / (1 + exp(post_mean$etaa[subj_index] * (cost / 50))),
+
+    # -------- efficiency terms --------
+    EP_yes = x1s + x2s,
+    EP_no  = violator + victim,
+
+    # -------- utilities --------
+    Uyes = x3s
+      - post_mean$envy[subj_index]   * disad
+      - post_mean$guilt[subj_index]  * ad
+      - post_mean$gama[subj_index]   * inqua * IIa
+      + post_mean$kapa[subj_index]   * RP
+      + post_mean$oumiga[subj_index] * EP_yes,
+
+    Uno = x3
+      - post_mean$envy[subj_index]   * disad_no
+      - post_mean$guilt[subj_index]  * ad_no
+      - post_mean$gama[subj_index]   * inqua_no * IIk
+      + post_mean$kapa[subj_index]   * RP_no
+      + post_mean$oumiga[subj_index] * EP_no,
+
+    # -------- choice probability --------
+    prediction = plogis(
+      post_mean$lambda[subj_index] * (Uyes - Uno)
+    ),
+
+    # -------- posterior predictive draw --------
+    prediction_bern = rbinom(1, 1, prediction)
+  ) %>%
+  ungroup()
+
+# ---------- 4. save output ----------
+write_csv(dat_pred, "prediction_m07.csv")
+```
+
+# model 9
+```{r}
+library(rstan)
+library(dplyr)
+library(readr)
+
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(
+    subj_index = as.integer(factor(subject_id))
+  )
+
+# ---------- 1. load Stan fit ----------
+fit <- readRDS(
+  here("Results", "fit_m09_Heuristic.rds")
+)
+
+
+post <- rstan::extract(fit)
+
+# subject-level posterior means
+post_mean <- list(
+  lambda = colMeans(post$lambda),
+  bs     = colMeans(post$bs),
+  bi     = colMeans(post$bi),
+  bc     = colMeans(post$bc),
+  br     = colMeans(post$br)
+)
+
+# ---------- 3. trial-level prediction ----------
+dat_pred <- dat %>%
+  rowwise() %>%
+  mutate(
+    # -------- recode block --------
+    # punish = +1, help = -1 (same as Stan)
+    block_sgn = ifelse(block == 1, 1, -1),
+
+    # -------- inequality term --------
+    inequa = pmax(violator - victim, 0),
+
+    # -------- linear predictor --------
+    lin = post_mean$bs[subj_index] * block_sgn +
+          post_mean$bi[subj_index] * inequa +
+          post_mean$bc[subj_index] * cost +
+          post_mean$br[subj_index] * ratio,
+
+    # -------- choice probability --------
+    prediction = plogis(
+      -post_mean$lambda[subj_index] * lin
+    ),
+
+    # -------- posterior predictive draw --------
+    prediction_bern = rbinom(1, 1, prediction)
+  ) %>%
+  ungroup()
+
+# ---------- 4. save output ----------
+write_csv(dat_pred, "prediction_m09.csv")
+
+```
+
+
+# model 10
+```{r}
+library(rstan)
+library(dplyr)
+library(readr)
+
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(
+  csv_path,
+  col_types = cols(
+    subject_id = col_integer(),
+    gender     = col_character(),
+    trial      = col_integer(),
+    action     = col_integer(),
+    block      = col_integer(),
+    violator   = col_double(),
+    victim     = col_double(),
+    cost       = col_double(),
+    ratio      = col_double(),
+    rt         = col_double()
+  )
+)
+
+dat <- dat %>%
+  arrange(subject_id, trial) %>%
+  mutate(
+    subj_index = as.integer(factor(subject_id))
+  )
+
+# ---------- 1. load Stan fit ----------
+fit <- readRDS(
+  here("Results", "fit_m10_Heuristic_lapse.rds")
+)
+
+post <- rstan::extract(fit)
+
+# subject-level posterior means
+post_mean <- list(
+  lambda = colMeans(post$lambda),
+  bs     = colMeans(post$bs),
+  bi     = colMeans(post$bi),
+  bc     = colMeans(post$bc),
+  br     = colMeans(post$br),
+  minp   = colMeans(post$minp),
+  maxp   = colMeans(post$maxp)
+)
+
+
+# ---------- 3. trial-level prediction ----------
+dat_pred <- dat %>%
+  rowwise() %>%
+  mutate(
+    # -------- recode block --------
+    # punish = +1, help = -1
+    block_sgn = ifelse(block == 1, 1, -1),
+
+    # -------- inequality term --------
+    inequa = pmax(violator - victim, 0),
+
+    # -------- linear predictor --------
+    lin = post_mean$bs[subj_index] * block_sgn +
+          post_mean$bi[subj_index] * inequa +
+          post_mean$bc[subj_index] * cost +
+          post_mean$br[subj_index] * ratio,
+
+    # -------- core choice probability --------
+    p_core = plogis(
+      -post_mean$lambda[subj_index] * lin
+    ),
+
+    # -------- lapse-adjusted probability --------
+    prediction =
+      post_mean$minp[subj_index] +
+      (1 - post_mean$minp[subj_index] - post_mean$maxp[subj_index]) * p_core,
+
+    # -------- posterior predictive draw --------
+    prediction_bern = rbinom(1, 1, prediction)
+  ) %>%
+  ungroup()
+
+# ---------- 4. save output ----------
+write_csv(dat_pred, "prediction_m10.csv")
+
+```

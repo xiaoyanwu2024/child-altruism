@@ -1,0 +1,180 @@
+---
+title: "ModelFittingAllModels"
+author: "Xiaoyan Wu"
+email: xiaoyan.psych@gmail.com
+date: May, 10, 2024
+output: html_document:
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+require("knitr") 
+#load libraries
+suppressMessages(library('rstan'))
+suppressMessages(library('loo'))
+suppressMessages(library('parallel'))
+suppressMessages(library('hBayesDM'))
+suppressMessages(library("reshape2"))
+
+library(StanHeaders)
+library(ggplot2)
+library(rstan)
+library(loo)
+library(reshape2)
+library(hBayesDM)
+library(readxl)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(here)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+Step1: load dataset
+```{r data loading}
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(csv_path,
+                col_types = cols(
+                  subject_id = col_integer(),
+                  gender     = col_character(),
+                  trial      = col_integer(),
+                  action     = col_integer(),
+                  block      = col_integer(),
+                  violator   = col_double(),
+                  victim     = col_double(),
+                  cost       = col_double(),
+                  ratio      = col_double(),
+                  rt         = col_double()
+                ))
+dat
+```
+
+
+Step 2 处理性别 & 排序
+```{r}
+dat <- dat %>%
+  mutate(gender_num = ifelse(gender == "女", 1L, 2L)) %>%
+  arrange(subject_id, trial)
+
+subjects <- unique(dat$subject_id)
+S <- length(subjects)
+
+dat
+```
+
+
+Step 3 Ragged index 构造
+```{r}
+idx_start <- integer(S)
+idx_end   <- integer(S)
+y         <- integer(0)
+block_all <- integer(0)
+viol_all  <- numeric(0)
+vict_all  <- numeric(0)
+cost_all  <- numeric(0)
+ratio_all <- numeric(0)
+group     <- integer(S)
+
+cursor <- 1L
+for (i in seq_along(subjects)) {
+  sid <- subjects[i]
+  df  <- dat %>% filter(subject_id == sid) %>% arrange(trial)
+
+  ntr <- nrow(df)
+  idx_start[i] <- cursor
+  idx_end[i]   <- cursor + ntr - 1L
+
+  y         <- c(y, df$action)
+  block_all <- c(block_all, df$block)
+  viol_all  <- c(viol_all, df$violator)
+  vict_all  <- c(vict_all, df$victim)
+  cost_all  <- c(cost_all, df$cost)
+  ratio_all <- c(ratio_all, df$ratio)
+
+  group[i]  <- df$gender_num[1]
+
+  cursor <- idx_end[i] + 1L
+}
+
+stan_data <- list(
+  S = S,
+  T = length(y),
+  idx_start = idx_start,
+  idx_end   = idx_end,
+  y         = as.integer(y),
+  group     = as.integer(group),
+  block     = as.integer(block_all),
+  violator  = as.numeric(viol_all),
+  victim    = as.numeric(vict_all),
+  cost      = as.numeric(cost_all),
+  ratio     = as.numeric(ratio_all)
+)
+```
+
+
+Step 4: Compile the model and run sampling
+```{r}
+library(rstan)
+library(loo)
+library(purrr)
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+model_dir <- here("StanModels")
+
+model_files <- c(
+  "m01_baseline.stan",
+  "m02_SI.stan",
+  "m03_SI_SCI.stan",
+  "m04_SI_SCI_VCI.stan",
+  "m05_SI_SCI_VCI_EC.stan",
+  "m06_SI_SCI_VCI_EC_RP.stan",
+  "m07_SI_SCI_VCI_EC_RP_ID.stan",
+  "m08_SI_SCI_VCI_EC_RP_ID_lapse.stan")
+
+model_names <- gsub(".stan", "", model_files)
+
+fit_one_model <- function(stan_file, stan_data, seed = 1234) {
+
+  message("Fitting: ", stan_file)
+
+  sm <- stan_model(file = file.path(model_dir, stan_file))
+
+  fit <- sampling(
+    sm,
+    data = stan_data,
+    chains = 2,
+    iter = 1200,
+    warmup = 600,
+    seed = 1234,
+    init = 0,
+    control = list(adapt_delta = 0.95, max_treedepth = 12)
+  )
+
+  return(fit)
+}
+```
+
+
+# Start model fitting with parallel computation
+```{r}
+library(future)
+library(furrr)
+
+plan(multisession, workers = 4) 
+
+fits <- future_map(
+  seq_along(model_files),
+  function(i) {
+    fit <- fit_one_model(model_files[i], stan_data)
+    saveRDS(fit, paste0("fitCorrect_", model_names[i], ".rds"))
+    fit
+  },
+  .options = furrr_options(seed = TRUE)
+)
+
+names(fits) <- model_names
+```

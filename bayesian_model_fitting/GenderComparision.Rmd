@@ -1,0 +1,253 @@
+---
+title: "genderComparision"
+author: "Xiaoyan Wu"
+email: xiaoyan.psych@gmail.com
+date: "2026-02-22"
+output: html_document
+---
+
+```{r}
+# library(rstan) 
+rm(list=ls())
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(here)
+
+fit <- readRDS(
+  here("Results", "fit_m08_SI_SCI_VCI_EC_RP_ID_lapse.rds")
+)
+
+# Extract group-level posterior draws
+draws_df <- as.data.frame( fit, pars = c( "mu_gama", "mu_envy", "mu_guilt", "mu_lambda", "mu_kapa", "mu_etak", "mu_etaa", "mu_oumiga", "mu_maxp", "mu_minp") ) 
+```
+
+
+```{r}
+# Organize data in long format
+long <- draws_df %>%
+  mutate(.iter = row_number()) %>%
+  pivot_longer(
+    - .iter,
+    names_to  = "param",
+    values_to = "value"
+  ) %>%
+  separate(param, into = c("name", "idx"), sep = "\\[") %>%
+  mutate(
+    idx = gsub("\\]", "", idx),
+    group_lab = ifelse(idx == "1", "Female", "Male"),
+    name = recode(
+      name,
+      mu_gama   = "gama",
+      mu_envy   = "envy",
+      mu_guilt  = "guilt",
+      mu_lambda = "lambda",
+      mu_kapa   = "kapa",
+      mu_etak   = "etak",
+      mu_etaa   = "etaa",
+      mu_oumiga = "oumiga",
+      mu_minp   = "minp",
+      mu_maxp   = "maxp"
+    )
+  )
+
+# Print gender difference statistics
+
+diff_summ <- long %>%
+  select(.iter, name, group_lab, value) %>%
+  pivot_wider(names_from = group_lab, values_from = value) %>%
+  mutate(diff = Male - Female) %>%
+  group_by(name) %>%
+  summarise(
+    mean_diff    = mean(diff),
+    ci_lo        = quantile(diff, 0.025),
+    ci_hi        = quantile(diff, 0.975),
+    prob_gt0     = mean(diff > 0),
+    prob_lt0     = mean(diff < 0),
+    p_two_tailed = 2 * pmin(prob_gt0, prob_lt0),
+    .groups = "drop"
+  )
+
+print(diff_summ)
+
+write_csv(
+  diff_summ,
+  "gender_difference_summary_mu_parameters.csv"
+)
+```
+
+
+
+```{r}
+# Plot figures (Greek letters and subscripts used only here)
+
+cols_gender <- c(
+  "Male"   = rgb(93, 160, 198, maxColorValue = 255),
+  "Female" = rgb(231, 113, 160, maxColorValue = 255)
+)
+
+param_labels <- c(
+  gama   = expression(gamma),
+  envy   = expression(alpha),
+  guilt  = expression(beta),
+  lambda = expression(lambda),
+  kapa   = expression(kappa),
+  etak   = expression(eta[keep]),
+  etaa   = expression(eta[action]),
+  oumiga = expression(omega),
+  minp   = expression(p[min]),
+  maxp   = expression(p[max])
+)
+
+p <- ggplot(
+  long,
+  aes(x = value, fill = group_lab, color = group_lab)
+) +
+  geom_density(alpha = 0.30, linewidth = 0.7) +
+  facet_wrap(
+    ~ name,
+    scales = "free",
+    ncol = 2,
+    labeller = labeller(name = param_labels)
+  ) +
+  scale_fill_manual(values = cols_gender) +
+  scale_color_manual(values = cols_gender) +
+  labs(
+    x = "Posterior value",
+    y = "Density",
+    fill  = "Gender",
+    color = "Gender",
+    title = "Gender differences in group-level parameters",
+    subtitle = "Posterior distributions of group-level means (μ)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(size = 13, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold")
+  )
+
+print(p)
+
+ggsave(
+  "gender_posterior_comparison_mu_parameters.png",
+  p,
+  width = 12,
+  height = 16,
+  dpi = 300
+)
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Gender colors
+cols_gender <- c(
+  "Male"   = rgb(93, 160, 198, maxColorValue = 255),   # Boys
+  "Female" = rgb(231, 113, 160, maxColorValue = 255)   # Girls
+)
+```
+
+# alpha parameter plot: gender difference
+```{r}
+p_envy <- ggplot(
+  filter(long, name == "envy"),
+  aes(x = value, fill = group_lab, color = group_lab)
+) +
+  geom_density(alpha = 0.30, linewidth = 0.8, adjust = 1.1) +
+  scale_fill_manual(values = cols_gender) +
+  scale_color_manual(values = cols_gender) +
+  labs(
+    x = expression(alpha),
+    y = "Density",
+    fill  = "Gender",
+    color = "Gender"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 16)
+  )
+
+print(p_envy)
+
+ggsave(
+  "posterior_envy_gender.png",
+  p_envy,
+  width = 4.5,
+  height = 4,
+  dpi = 300
+)
+
+```
+
+
+# kappa parameter plot: gender difference
+```{r}
+p_kappa <- ggplot(
+  filter(long, name == "kapa"),
+  aes(x = value, fill = group_lab, color = group_lab)
+) +
+  geom_density(alpha = 0.30, linewidth = 0.8, adjust = 1.1) +
+  scale_fill_manual(values = cols_gender) +
+  scale_color_manual(values = cols_gender) +
+  labs(
+    x = expression(kappa),
+    y = "Density",
+    fill  = "Gender",
+    color = "Gender"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 16)
+  )
+
+print(p_kappa)
+
+ggsave(
+  "posterior_kappa_gender.png",
+  p_kappa,
+  width = 4.5,
+  height = 4,
+  dpi = 300
+)
+
+```
+
+# p_min parameter plot: gender difference
+```{r}
+p_minp <- ggplot(
+  filter(long, name == "minp"),
+  aes(x = value, fill = group_lab, color = group_lab)
+) +
+  geom_density(alpha = 0.30, linewidth = 0.8, adjust = 1.1) +
+  scale_fill_manual(values = cols_gender) +
+  scale_color_manual(values = cols_gender) +
+  labs(
+    x = expression(p[min]),
+    y = "Density",
+    fill  = "Gender",
+    color = "Gender"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 16)
+  )
+
+print(p_minp)
+
+ggsave(
+  "posterior_pmin_gender.png",
+  p_minp,
+  width = 4.5,
+  height = 4,
+  dpi = 300
+)
+```
+
+

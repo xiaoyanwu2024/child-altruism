@@ -1,0 +1,500 @@
+---
+title: "Model Compasion Analysis"
+author: "Xiaoyan Wu"
+email: xiaoyan.psych@gmail.com
+date: "2026-02-20"
+output: html_document
+---
+
+# 导入所有模型
+```{r}
+rm(list=ls())
+require("knitr") 
+suppressMessages(library('rstan'))
+suppressMessages(library('loo'))
+suppressMessages(library('parallel'))
+suppressMessages(library('hBayesDM'))
+suppressMessages(library("reshape2"))
+library(StanHeaders)
+library(ggplot2)
+library(rstan)
+library(loo)
+library(reshape2)
+library(hBayesDM)
+library(readxl)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(here)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+library(purrr)
+
+csv_path <- here("dataset", "trials_gender.csv")
+
+dat <- read_csv(csv_path,
+                col_types = cols(
+                  subject_id = col_integer(),
+                  gender     = col_character(),
+                  trial      = col_integer(),
+                  action     = col_integer(),
+                  block      = col_integer(),
+                  violator   = col_double(),
+                  victim     = col_double(),
+                  cost       = col_double(),
+                  ratio      = col_double(),
+                  rt         = col_double()
+                ))
+
+dat <- dat %>%
+  mutate(gender_num = ifelse(gender == "女", 1L, 2L)) %>%
+  arrange(subject_id, trial)
+
+subjects <- unique(dat$subject_id)
+S <- length(subjects)
+
+group <- integer(S)
+
+for (i in seq_along(subjects)) {
+  sid <- subjects[i]
+  df  <- dat %>% filter(subject_id == sid)
+  group[i] <- df$gender_num[1]
+}
+
+fit_dir <- here("Results")
+
+fit_files <- list.files(
+  fit_dir,
+  pattern = "^fit_.*\\.rds$",
+  full.names = TRUE
+)
+
+fits <- map(fit_files, readRDS)
+names(fits) <- gsub("^fit_|\\.rds$", "", basename(fit_files))
+
+```
+
+
+# Model comparision
+```{r}
+#--------------------------------------------------
+# Extract subject-level log-likelihood
+#--------------------------------------------------
+
+loglik_subj_list <- map(
+  fits,
+  ~ {
+    ll <- rstan::extract(
+      .x,
+      pars = "log_lik_subj",
+      permuted = FALSE
+    )
+    # ll: iterations × chains × S
+    apply(ll, c(1, 3), sum)
+  }
+)
+
+#--------------------------------------------------
+# 3. PSIS-LOO（subject-level）
+#--------------------------------------------------
+
+loo_list <- map(loglik_subj_list, loo::loo)
+names(loo_list) <- names(fits)
+
+#--------------------------------------------------
+# 4. 模型比较
+#--------------------------------------------------
+
+loo_compare_res <- loo::loo_compare(loo_list)
+print(loo_compare_res)
+
+```
+
+# Model comparison across multiple metrics
+```{r}
+## PSIS-LOO
+
+# Extract ELPD and LOOIC
+loo_summary <- map_df(
+  loo_list,
+  ~ tibble(
+    elpd_loo = .x$estimates["elpd_loo", "Estimate"],
+    se_elpd  = .x$estimates["elpd_loo", "SE"],
+    looic    = .x$estimates["looic", "Estimate"],
+    se_looic = .x$estimates["looic", "SE"]
+  ),
+  .id = "model"
+)
+
+loo_summary
+
+
+## WAIC
+waic_list <- map(loglik_subj_list, loo::waic)
+
+waic_summary <- map_df(
+  waic_list,
+  ~ tibble(
+    waic   = .x$estimates["waic", "Estimate"],
+    se_waic = .x$estimates["waic", "SE"]
+  ),
+  .id = "model"
+)
+
+waic_summary
+
+
+## DIC
+dic_list <- map(
+  loglik_subj_list,
+  ~ {
+    dev <- -2 * .x
+    D_bar <- mean(rowSums(dev))
+    D_hat <- sum(colMeans(dev))
+    DIC <- 2 * D_bar - D_hat
+    DIC
+  }
+)
+
+dic_df <- tibble(
+  model = names(dic_list),
+  DIC   = unlist(dic_list)
+)
+
+dic_df
+```
+
+
+# Perform model comparison separately by gender
+```{r}
+library(rstan)
+library(loo)
+library(purrr)
+library(dplyr)
+library(tibble)
+
+#--------------------------------------------------
+# Extract subject-level log-likelihood
+#    (iterations × S)
+#--------------------------------------------------
+
+loglik_subj_list <- map(
+  fits,
+  ~ {
+    ll <- rstan::extract(
+      .x,
+      pars = "log_lik_subj",
+      permuted = FALSE
+    )
+    # ll: iterations × chains × S
+    apply(ll, c(1, 3), sum)
+  }
+)
+
+#--------------------------------------------------
+# Gender index
+#--------------------------------------------------
+
+female_idx <- which(group == 1)
+male_idx   <- which(group == 2)
+
+#--------------------------------------------------
+# Compute PSIS-LOO separately by gender
+#--------------------------------------------------
+
+loo_female <- map(
+  loglik_subj_list,
+  ~ loo::loo(.x[, female_idx, drop = FALSE])
+)
+
+loo_male <- map(
+  loglik_subj_list,
+  ~ loo::loo(.x[, male_idx, drop = FALSE])
+)
+
+#--------------------------------------------------
+# Compute WAIC separately by gender
+#--------------------------------------------------
+
+waic_female <- map(
+  loglik_subj_list,
+  ~ loo::waic(.x[, female_idx, drop = FALSE])
+)
+
+waic_male <- map(
+  loglik_subj_list,
+  ~ loo::waic(.x[, male_idx, drop = FALSE])
+)
+
+#--------------------------------------------------
+# 5. Extract LOO / WAIC metrics
+#--------------------------------------------------
+
+extract_loo_waic <- function(loo_list, waic_list, gender_label) {
+  map_df(
+    names(loo_list),
+    ~ tibble(
+      model   = .x,
+      elpd_loo = loo_list[[.x]]$estimates["elpd_loo", "Estimate"],
+      se_elpd  = loo_list[[.x]]$estimates["elpd_loo", "SE"],
+      looic    = loo_list[[.x]]$estimates["looic", "Estimate"],
+      se_looic = loo_list[[.x]]$estimates["looic", "SE"],
+      waic     = waic_list[[.x]]$estimates["waic", "Estimate"],
+      se_waic  = waic_list[[.x]]$estimates["waic", "SE"],
+      gender   = gender_label
+    )
+  )
+}
+
+loo_waic_female_df <- extract_loo_waic(loo_female, waic_female, "Female")
+loo_waic_male_df   <- extract_loo_waic(loo_male,   waic_male,   "Male")
+
+loo_waic_df <- bind_rows(loo_waic_female_df, loo_waic_male_df)
+
+#--------------------------------------------------
+# 6. Compute DIC separately by gender
+#--------------------------------------------------
+
+compute_dic <- function(loglik_mat) {
+  dev <- -2 * loglik_mat
+  D_bar <- mean(rowSums(dev))
+  D_hat <- sum(colMeans(dev))
+  2 * D_bar - D_hat
+}
+
+dic_female <- map_dbl(
+  loglik_subj_list,
+  ~ compute_dic(.x[, female_idx, drop = FALSE])
+)
+
+dic_male <- map_dbl(
+  loglik_subj_list,
+  ~ compute_dic(.x[, male_idx, drop = FALSE])
+)
+
+dic_df <- bind_rows(
+  tibble(model = names(dic_female),
+         DIC = dic_female,
+         gender = "Female"),
+  tibble(model = names(dic_male),
+         DIC = dic_male,
+         gender = "Male")
+)
+
+#--------------------------------------------------
+# 7. Combine all metrics
+#--------------------------------------------------
+
+model_comparison_gender <- loo_waic_df %>%
+  left_join(dic_df, by = c("model", "gender")) %>%
+  arrange(gender, looic)
+```
+
+```{r}
+#--------------------------------------------------
+# 8. Print results separately by gender
+#--------------------------------------------------
+
+model_comp_female <- model_comparison_gender %>%
+  filter(gender == "Female") %>%
+  arrange(looic)
+
+model_comp_male <- model_comparison_gender %>%
+  filter(gender == "Male") %>%
+  arrange(looic)
+
+cat("\n===== Female participants =====\n")
+print(model_comp_female)
+
+```
+
+```{r}
+cat("\n===== Male participants =====\n")
+print(model_comp_male)
+```
+
+# Figures reported in the manuscript
+# All subjects
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tibble)
+
+loo_df <- as.data.frame(loo_compare_res) %>%
+  rownames_to_column("model") %>%
+  mutate(
+    model = factor(model)  # 最优模型在最上
+  )
+p_main <- ggplot(
+  loo_df,
+  aes(x = elpd_diff, y = model)
+) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50",
+    linewidth = 0.7
+  ) +
+  geom_point(size = 3) +
+  geom_errorbarh(
+    aes(
+      xmin = elpd_diff - se_diff,
+      xmax = elpd_diff + se_diff
+    ),
+    height = 0.25,
+    linewidth = 0.8
+  ) +
+  labs(
+    x = expression(Delta * "ELPD (relative to best model)"),
+    y = NULL,
+    title = "Model comparison using PSIS-LOO",
+    subtitle = "Points indicate ΔELPD; error bars show ±1 SE"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 13),
+    axis.text.y = element_text(size = 12)
+  )
+
+print(p_main)
+```
+
+# Plot figures separately by gender: Girls
+```{r}
+model_order <- model_comp_female %>%
+  arrange(looic) %>%        # 或 arrange(elpd_loo)
+  pull(model)
+
+#--------------------------------------------------
+# Model order
+#--------------------------------------------------
+model_order <- c(
+  "m01_baseline",
+  "m02_SI",
+  "m03_SI_SCI",
+  "m04_SI_SCI_VCI",
+  "m05_SI_SCI_VCI_EC",
+  "m06_SI_SCI_VCI_EC_RP",
+  "m07_SI_SCI_VCI_EC_RP_ID",
+  "m08_SI_SCI_VCI_EC_RP_ID_lapse",
+  "m09_Heuristic",
+  "m10_Heuristic_lapse"
+)
+
+best_elpd_female <- max(model_comp_female$elpd_loo)
+
+#--------------------------------------------------
+# plot（girls）
+#--------------------------------------------------
+p_female <- model_comp_female %>%
+  mutate(
+    model = factor(model, levels = model_order),
+    elpd_diff = elpd_loo - best_elpd_female
+  ) %>%
+  ggplot(aes(x = elpd_diff, y = model)) +
+
+  # reference line
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50",
+    linewidth = 0.7
+  ) +
+
+  # points
+  geom_point(
+    size = 3,
+    color = rgb(231, 113, 160, maxColorValue = 255)
+  ) +
+
+  # error bars (±1 SE)
+  geom_errorbarh(
+    data = ~ subset(.x, elpd_diff != 0),
+    aes(
+      xmin = elpd_diff - se_elpd,
+      xmax = elpd_diff + se_elpd
+    ),
+    height = 0.25,
+    linewidth = 0.8,
+    color = rgb(231, 113, 160, maxColorValue = 255)
+  ) +
+
+  labs(
+    x = expression(Delta * ELPD[LOO]),
+    y = NULL,
+    title = "Model comparison (Female participants)",
+    subtitle = "PSIS-LOO; points indicate ΔELPD, error bars show ±1 SE"
+  ) +
+
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 13),
+    axis.text.y = element_text(size = 12)
+  )
+
+print(p_female)
+
+```
+
+
+# Plot figures separately by gender: Boys
+```{r}
+library(dplyr)
+library(ggplot2)
+
+#--------------------------------------------------
+# plot
+#--------------------------------------------------
+p_male <- model_comp_male %>%
+  mutate(
+    model = factor(model, levels = model_order),
+    elpd_diff = elpd_loo - max(elpd_loo)
+  ) %>%
+  ggplot(aes(x = elpd_diff, y = model)) +
+  
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    color = "grey50",
+    linewidth = 0.7
+  ) +
+  
+  geom_point(
+    size = 3,
+    color = rgb(93, 160, 198, maxColorValue = 255)   # Boys
+  ) +
+  
+  geom_errorbarh(
+    data = ~ subset(.x, elpd_diff != 0),
+    aes(
+      xmin = elpd_diff - se_elpd,
+      xmax = elpd_diff + se_elpd
+    ),
+    height = 0.25,
+    linewidth = 0.8,
+    color = rgb(93, 160, 198, maxColorValue = 255)
+  ) +
+  
+  labs(
+    x = expression(Delta * "ELPD"[LOO]),
+    y = NULL,
+    title = "Model comparison (Male participants)",
+    subtitle = "PSIS-LOO; error bars indicate ±1 SE"
+  ) +
+  
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 13),
+    axis.text.y = element_text(size = 12)
+  )
+
+print(p_male)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
